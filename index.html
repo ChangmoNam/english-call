@@ -123,7 +123,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       <div class="ring"></div><div class="ring"></div><div class="ring"></div>
       <div class="avatar">🤖</div>
     </div>
-    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v8.1</div>
+    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · <span id="verTag"></span></div>
     <div class="caller-name">Alex Reed</div>
     <div class="caller-role">Humanoid Robotics Expert · VC Partner<br>Your English Coach</div>
     <div class="call-status" id="callStatus">Ringing…</div>
@@ -265,6 +265,26 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 
 <script>
 /* =================== STATE =================== */
+/* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
+const APP_VER='v8.2';
+document.getElementById('verTag').textContent=APP_VER;
+/* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
+   don't appear immediately. On every launch, fetch our own HTML bypassing all
+   caches; if a newer APP_VER exists, jump to a cache-busted URL once. */
+(async function checkUpdate(){
+  try{
+    const res=await fetch(location.pathname+'?nocache='+Date.now(), {cache:'no-store'});
+    if(!res.ok) return;
+    const txt=await res.text();
+    const m=txt.match(/APP_VER='(v[\d.]+)'/);
+    if(m && m[1]!==APP_VER && sessionStorage.getItem('ecall_upd')!==m[1]){
+      sessionStorage.setItem('ecall_upd', m[1]);
+      toast('새 버전 '+m[1]+' 발견 — 업데이트 중…', 2000);
+      setTimeout(()=>location.replace(location.pathname+'?u='+encodeURIComponent(m[1])), 900);
+    }
+  }catch(_){}
+})();
+
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
 const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
