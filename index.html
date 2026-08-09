@@ -240,6 +240,20 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       </div>
     </div>
 
+    <div class="row2">
+      <div class="field">
+        <label>Cerebras API 키 (선택·폴백)</label>
+        <input id="cerebrasKey" type="password" placeholder="csk-...">
+      </div>
+      <div class="field">
+        <label>OpenRouter API 키 (선택·폴백)</label>
+        <input id="orKey" type="password" placeholder="sk-or-...">
+      </div>
+    </div>
+    <div class="field" style="margin-top:-12px">
+      <div class="hint">폴백 순서: Gemini → Groq → Cerebras → OpenRouter. 키가 있는 곳만 사용합니다. 무료 발급: cloud.cerebras.ai · openrouter.ai (둘 다 카드 불필요)</div>
+    </div>
+
     <div class="field">
       <label>MacroDroid 웹훅 URL (선택)</label>
       <input id="mdWebhook" placeholder="https://trigger.macrodroid.com/기기ID/goalmet">
@@ -266,7 +280,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 /* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
-const APP_VER='v8.2';
+const APP_VER='v8.3';
 document.getElementById('verTag').textContent=APP_VER;
 /* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
    don't appear immediately. On every launch, fetch our own HTML bypassing all
@@ -286,7 +300,7 @@ document.getElementById('verTag').textContent=APP_VER;
 })();
 
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
-const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'' };
+const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'', cerebrasKey:'', orKey:'' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
 let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
@@ -552,32 +566,65 @@ const SUMMARY_PROMPT = `You are a study-log writer. Given the transcript of toda
 {"date":"YYYY-MM-DD","topics":["…"],"mistakes":["frequent mistake patterns, short"],"learned":["expressions the student practiced successfully"],"pending_drills":["topics/questions NOT completed to the full 2-sentence level, or mistakes that failed the re-check — next session restarts the drill ladder on these"],"level_note":"one short sentence on level & progress (Korean OK)"}
 Keep every item short. Max 5 items per list.`;
 
-/* =================== LLM CALLS =================== */
+/* =================== LLM CALLS (v8.3: multi-provider chain) =================== */
 async function callLLM(msgs, sys){
   if(settings.provider==='claude') return callClaude(msgs, sys);
-  return callGemini(msgs, sys);
+  return callChain(msgs, sys);
 }
 function isQuotaError(msg){ return /429|RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(msg||''); }
 
-async function callGemini(msgs, sys){
-  // apiKey field may contain multiple keys separated by commas → try in order on quota errors
-  const keys = (settings.apiKey||'').split(',').map(k=>k.trim()).filter(Boolean);
-  if(!keys.length) throw new Error('API 키가 없습니다.');
+/* session-scoped state: once a provider is exhausted, skip it for the rest of
+   the session instead of burning a failed request every turn */
+let chain = { geminiDead:false, fbStart:0, lastProvider:'' };
+function resetChain(){ chain={ geminiDead:false, fbStart:0, lastProvider:'' }; }
+
+function fallbackProviders(){
+  return [
+    { name:'Groq',       key:settings.groqKey,     base:'https://api.groq.com/openai/v1/chat/completions',  model:'llama-3.3-70b-versatile' },
+    { name:'Cerebras',   key:settings.cerebrasKey, base:'https://api.cerebras.ai/v1/chat/completions',      model:'llama-3.3-70b' },
+    { name:'OpenRouter', key:settings.orKey,       base:'https://openrouter.ai/api/v1/chat/completions',    model:'meta-llama/llama-3.3-70b-instruct:free' },
+  ].filter(p=>p.key);
+}
+
+async function callChain(msgs, sys){
   let lastErr=null;
-  for(const key of keys){
-    try{ return await callGeminiWithKey(msgs, sys, key); }
-    catch(err){
-      lastErr=err;
-      if(!isQuotaError(err.message)) throw err;   // real error → stop
-      // quota error → try next key
+  // 1) Gemini keys in order (skip if already exhausted this session)
+  if(!chain.geminiDead){
+    const keys=(settings.apiKey||'').split(',').map(k=>k.trim()).filter(Boolean);
+    for(const key of keys){
+      try{
+        const out=await callGeminiWithKey(msgs, sys, key);
+        chain.lastProvider='Gemini'; return out;
+      }catch(err){
+        lastErr=err;
+        if(!isQuotaError(err.message)) throw err;   // real error (bad key, etc.) → surface it
+      }
     }
+    if(keys.length){ chain.geminiDead=true; }
   }
-  // all Gemini keys exhausted → fall back to Groq LLM if available
-  if(settings.groqKey){
-    toast('Gemini 한도 초과 — Groq(Llama)로 자동 전환합니다', 3000);
-    return callGroqLLM(msgs, sys);
+  // 2) fallback providers in order, starting from last known-good
+  const fbs=fallbackProviders();
+  for(let i=chain.fbStart; i<fbs.length; i++){
+    const p=fbs[i];
+    try{
+      const out=await callOpenAICompat(p, msgs, sys);
+      chain.fbStart=i;
+      if(chain.lastProvider!==p.name){ toast('한도 초과 — '+p.name+'로 자동 전환', 2500); chain.lastProvider=p.name; }
+      return out;
+    }catch(err){ lastErr=err; /* any failure → next provider */ }
   }
-  throw lastErr;
+  throw lastErr || new Error('사용 가능한 API가 없습니다. 설정에서 키를 확인하세요.');
+}
+
+async function callOpenAICompat(p, msgs, sys){
+  const res = await fetch(p.base,{
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+p.key },
+    body: JSON.stringify({ model:p.model, max_tokens:1024,
+      messages:[ {role:'system', content:sys}, ...msgs.map(m=>({role:m.role, content:m.content})) ] }) });
+  if(!res.ok){ const e=await res.text(); throw new Error(p.name+' '+res.status+': '+e.slice(0,150)); }
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '';
 }
 async function callGeminiWithKey(msgs, sys, key){
   const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model||'gemini-3.6-flash')}:generateContent?key=${encodeURIComponent(key)}`;
@@ -588,16 +635,6 @@ async function callGeminiWithKey(msgs, sys, key){
   if(!res.ok){ const e=await res.text(); throw new Error('Gemini '+res.status+': '+e.slice(0,180)); }
   const data = await res.json();
   return (data.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('');
-}
-async function callGroqLLM(msgs, sys){
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions',{
-    method:'POST',
-    headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+settings.groqKey },
-    body: JSON.stringify({ model:'llama-3.3-70b-versatile', max_tokens:1024,
-      messages:[ {role:'system', content:sys}, ...msgs.map(m=>({role:m.role, content:m.content})) ] }) });
-  if(!res.ok){ const e=await res.text(); throw new Error('GroqLLM '+res.status+': '+e.slice(0,150)); }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
 }
 async function callClaude(msgs, sys){
   const res = await fetch('https://api.anthropic.com/v1/messages',{ method:'POST',
@@ -647,6 +684,7 @@ async function sendStudent(text){
 async function startSession(){
   if(!settings.apiKey){ toast('먼저 설정에서 API 키를 입력하세요.'); show('settingsScreen'); return; }
   messages=[]; chat.innerHTML='';
+  resetChain();
   show('sessionScreen');
   addSys(todayStr()+' · IR English Session');
   dailyBase = getDaily().sec;
@@ -733,7 +771,7 @@ function loadSettingsUI(){
   $('provider').value=settings.provider; $('model').value=settings.model;
   $('apiKey').value=settings.apiKey; $('ttsRate').value=settings.ttsRate;
   $('sessionMin').value=settings.sessionMin; $('irText').value=irText;
-  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||'';
+  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||''; $('cerebrasKey').value=settings.cerebrasKey||''; $('orKey').value=settings.orKey||'';
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
 }
 $('provider').onchange = e=>{
@@ -742,7 +780,7 @@ $('provider').onchange = e=>{
 $('saveBtn').onclick = ()=>{
   settings={ provider:$('provider').value, model:$('model').value.trim(),
     apiKey:$('apiKey').value.trim(), ttsRate:$('ttsRate').value, sessionMin:$('sessionMin').value,
-    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim(), mdWebhook:$('mdWebhook').value.trim() };
+    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim(), mdWebhook:$('mdWebhook').value.trim(), cerebrasKey:$('cerebrasKey').value.trim(), orKey:$('orKey').value.trim() };
   irText=$('irText').value;
   localStorage.setItem(LS.set, JSON.stringify(settings));
   localStorage.setItem(LS.ir, irText);
