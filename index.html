@@ -121,7 +121,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       <div class="ring"></div><div class="ring"></div><div class="ring"></div>
       <div class="avatar">🤖</div>
     </div>
-    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v3</div>
+    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v5</div>
     <div class="caller-name">Alex Reed</div>
     <div class="caller-role">Humanoid Robotics Expert · VC Partner<br>Your English Coach</div>
     <div class="call-status" id="callStatus">Ringing…</div>
@@ -204,6 +204,23 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 
     <div class="row2">
       <div class="field">
+        <label>음성인식 엔진</label>
+        <select id="sttEngine">
+          <option value="browser">브라우저 내장 (무료·기본)</option>
+          <option value="groq">Groq Whisper (무료 티어·정확도↑)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Groq API 키</label>
+        <input id="groqKey" type="password" placeholder="gsk_... (Whisper용)">
+      </div>
+    </div>
+    <div class="field" style="margin-top:-12px">
+      <div class="hint">한국어 억양 영어 인식이 잘 안 되면 Groq Whisper를 권장합니다. console.groq.com에서 무료 키 발급 (신용카드 불필요).</div>
+    </div>
+
+    <div class="row2">
+      <div class="field">
         <label>말하기 속도</label>
         <select id="ttsRate">
           <option value="0.75">아주 천천히 (0.75x)</option>
@@ -241,7 +258,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
-const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30' };
+const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
 let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
@@ -279,14 +296,11 @@ function speak(text, rate){
 /* =================== STT =================== */
 let recog=null, committedText='', currentText='';
 
-/* v3 — Android Chrome delivers recognition results in inconsistent ways:
-   sometimes as separate segments, sometimes as GROWING cumulative snapshots
-   (each new entry repeats all previous text). Strategy:
-   1) continuous=false + auto-restart: each utterance session is independent,
-      committed exactly once on session end.
-   2) combineResults(): if an entry contains the accumulated text as a prefix,
-      it REPLACES it (cumulative mode); exact-duplicate tails are skipped;
-      otherwise entries are appended (segmented mode). */
+/* v5 — two STT engines:
+   [browser] Web Speech API, continuous=true (no mid-sentence clipping for slow
+   speakers) + combineResults smart merge (prevents Android duplication).
+   [groq] MediaRecorder → Groq Whisper API (far better accuracy for accented
+   English; free tier). Selected in settings. */
 function combineResults(results){
   let out='';
   for(let i=0;i<results.length;i++){
@@ -301,21 +315,19 @@ function combineResults(results){
   return out.trim();
 }
 function dedupeRuns(s){
-  // safety net: collapse 3+ consecutive repeats of the same 1–4 word phrase
   return s.replace(/\b((?:\S+\s+){0,3}\S+)(?:\s+\1\b){2,}/gi, '$1');
 }
 function initRecog(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SR){ toast('이 브라우저는 음성인식을 지원하지 않습니다. Android Chrome을 사용하세요.',4000); return null; }
   const r = new SR();
-  r.lang='en-US'; r.continuous=false; r.interimResults=true; r.maxAlternatives=1;
+  r.lang='en-US'; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
   r.onresult = e=>{
     currentText = combineResults(e.results);   // replace, never append across events
     interim.textContent = dedupeRuns((committedText+' '+currentText).trim()) || '…';
   };
   r.onerror = e=>{
     if(e.error==='not-allowed'){ toast('마이크 권한을 허용해주세요.'); stopListening(false); }
-    /* 'no-speech' / 'aborted' → onend will restart while listening */
   };
   r.onend = ()=>{
     if(currentText){
@@ -324,9 +336,63 @@ function initRecog(){
       else if(!lo.endsWith(lt)) committedText=committedText+' '+currentText;
       currentText='';
     }
-    if(listening){ try{ r.start(); }catch(_){} }  // next utterance session
+    if(listening){ try{ r.start(); }catch(_){} }  // browser may still auto-end; resume
   };
   return r;
+}
+
+/* ---- Groq Whisper engine ---- */
+let mediaRecorder=null, audioChunks=[], groqBusy=false;
+async function startGroqRecording(){
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  audioChunks=[];
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = e=>{ if(e.data && e.data.size) audioChunks.push(e.data); };
+  mediaRecorder.start();
+}
+function stopGroqRecording(){
+  return new Promise(res=>{
+    mediaRecorder.onstop = ()=>{
+      mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+      res(new Blob(audioChunks, {type: mediaRecorder.mimeType || 'audio/webm'}));
+    };
+    mediaRecorder.stop();
+  });
+}
+async function transcribeGroq(blob){
+  const fd=new FormData();
+  fd.append('file', blob, 'speech.webm');
+  fd.append('model','whisper-large-v3-turbo');
+  fd.append('language','en');
+  const res=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{
+    method:'POST', headers:{ 'Authorization':'Bearer '+settings.groqKey }, body:fd });
+  if(!res.ok){ const e=await res.text(); throw new Error('Groq '+res.status+': '+e.slice(0,150)); }
+  const d=await res.json(); return (d.text||'').trim();
+}
+async function startGroqListen(){
+  if(busy||groqBusy) return;
+  if(!settings.groqKey){ toast('설정에서 Groq API 키를 입력하세요.'); return; }
+  speechSynthesis.cancel();
+  try{ await startGroqRecording(); }
+  catch(_){ toast('마이크 권한을 허용해주세요.'); return; }
+  listening=true;
+  micBtn.classList.add('listening'); micBtn.textContent='⏹';
+  $('micHint').textContent='녹음 중 · 말이 끝나면 탭하세요';
+  interim.textContent='● 녹음 중…';
+}
+async function stopGroqListen(){
+  listening=false; groqBusy=true;
+  micBtn.classList.remove('listening'); micBtn.textContent='🎙️';
+  $('micHint').textContent='탭하고 영어로 말하세요 · 끝나면 다시 탭';
+  interim.textContent='인식 중…';
+  try{
+    const blob = await stopGroqRecording();
+    if(blob.size < 1500){ interim.textContent=''; groqBusy=false; return; } // too short / empty
+    const text = await transcribeGroq(blob);
+    interim.textContent='';
+    if(text) sendStudent(text);
+  }catch(err){ interim.textContent=''; toast('음성 인식 실패: '+err.message, 3500); }
+  groqBusy=false;
 }
 
 function startListening(){
@@ -349,7 +415,10 @@ function stopListening(send=true){
   committedText=''; currentText=''; interim.textContent='';
   if(send && text) sendStudent(text);
 }
-micBtn.onclick = ()=> listening ? stopListening(true) : startListening();
+micBtn.onclick = ()=>{
+  if(settings.sttEngine==='groq'){ listening ? stopGroqListen() : startGroqListen(); }
+  else { listening ? stopListening(true) : startListening(); }
+};
 
 /* =================== UI RENDER =================== */
 function addBubble(role, text, whoLabel){
@@ -454,6 +523,8 @@ function parseJSON(raw){
   try{ return JSON.parse(t); }catch(_){ return { reply: raw.trim(), heard:null, correction:null, model_answer:null }; }
 }
 
+const HISTORY_WINDOW = 16;   // send only recent messages; long-term context lives in session memory
+
 /* =================== CONVERSATION FLOW =================== */
 async function sendStudent(text){
   if(busy) return; busy=true;
@@ -461,7 +532,7 @@ async function sendStudent(text){
   messages.push({role:'user', content:text});
   showTyping();
   try{
-    const raw = await callLLM(messages, systemPrompt());
+    const raw = await callLLM(messages.slice(-HISTORY_WINDOW), systemPrompt());
     messages.push({role:'assistant', content:raw});
     const j = parseJSON(raw);
     hideTyping();
@@ -542,6 +613,7 @@ function loadSettingsUI(){
   $('provider').value=settings.provider; $('model').value=settings.model;
   $('apiKey').value=settings.apiKey; $('ttsRate').value=settings.ttsRate;
   $('sessionMin').value=settings.sessionMin; $('irText').value=irText;
+  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||'';
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
 }
 $('provider').onchange = e=>{
@@ -549,7 +621,8 @@ $('provider').onchange = e=>{
 };
 $('saveBtn').onclick = ()=>{
   settings={ provider:$('provider').value, model:$('model').value.trim(),
-    apiKey:$('apiKey').value.trim(), ttsRate:$('ttsRate').value, sessionMin:$('sessionMin').value };
+    apiKey:$('apiKey').value.trim(), ttsRate:$('ttsRate').value, sessionMin:$('sessionMin').value,
+    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim() };
   irText=$('irText').value;
   localStorage.setItem(LS.set, JSON.stringify(settings));
   localStorage.setItem(LS.ir, irText);
