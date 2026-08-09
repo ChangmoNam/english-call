@@ -181,7 +181,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       </div>
       <div class="field">
         <label>모델명</label>
-        <input id="model" placeholder="gemini-2.5-flash">
+        <input id="model" placeholder="gemini-3.6-flash">
       </div>
     </div>
 
@@ -193,8 +193,13 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 
     <div class="field">
       <label>IR 자료 (회사 소개 · 투자 포인트)</label>
-      <textarea id="irText" placeholder="ROBROS IR 자료의 핵심 내용을 여기에 붙여넣으세요. 회사 개요, 제품/기술, 시장, 트랙션, 팀, 투자 조건 등. Alex는 이 내용만을 근거로 투자자 질문을 합니다."></textarea>
-      <div class="hint">여기 있는 내용이 대화의 사실 기준이 됩니다. 없는 내용은 AI가 지어내지 않도록 지시되어 있습니다.</div>
+      <div style="display:flex;gap:9px;margin-bottom:9px">
+        <button class="mini-btn" id="pdfBtn" type="button">📄 PDF에서 불러오기</button>
+        <button class="mini-btn danger" id="irClearBtn" type="button">비우기</button>
+        <input type="file" id="pdfFile" accept=".pdf,application/pdf" style="display:none">
+      </div>
+      <textarea id="irText" placeholder="ROBROS IR 자료의 핵심 내용을 여기에 붙여넣거나, 위 버튼으로 PDF에서 텍스트를 추출하세요. Alex는 이 내용만을 근거로 투자자 질문을 합니다."></textarea>
+      <div class="hint">여기 있는 내용이 대화의 사실 기준이 됩니다. PDF 추출은 이 기기 안에서만 처리되며 외부로 전송되지 않습니다. 추출 후 내용을 한 번 훑어보고 불필요한 부분은 지워주세요.</div>
     </div>
 
     <div class="row2">
@@ -236,7 +241,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
-const DEFAULTS = { provider:'gemini', model:'gemini-2.5-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30' };
+const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
 let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
@@ -394,11 +399,11 @@ async function callLLM(msgs, sys){
   return callGemini(msgs, sys);
 }
 async function callGemini(msgs, sys){
-  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model||'gemini-2.5-flash')}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model||'gemini-3.6-flash')}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
   const contents = msgs.map(m=>({ role: m.role==='assistant'?'model':'user', parts:[{text:m.content}] }));
   const res = await fetch(url,{ method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ system_instruction:{parts:[{text:sys}]}, contents,
-      generationConfig:{ temperature:0.7, maxOutputTokens:1024 } }) });
+      generationConfig:{ maxOutputTokens:4096 } }) });
   if(!res.ok){ const e=await res.text(); throw new Error('Gemini '+res.status+': '+e.slice(0,180)); }
   const data = await res.json();
   return (data.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('');
@@ -511,7 +516,7 @@ function loadSettingsUI(){
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
 }
 $('provider').onchange = e=>{
-  $('model').value = e.target.value==='claude' ? 'claude-haiku-4-5-20251001' : 'gemini-2.5-flash';
+  $('model').value = e.target.value==='claude' ? 'claude-haiku-4-5-20251001' : 'gemini-3.6-flash';
 };
 $('saveBtn').onclick = ()=>{
   settings={ provider:$('provider').value, model:$('model').value.trim(),
