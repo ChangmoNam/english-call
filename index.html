@@ -280,7 +280,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 /* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
-const APP_VER='v8.5';
+const APP_VER='v8.6';
 document.getElementById('verTag').textContent=APP_VER;
 /* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
    don't appear immediately. On every launch, fetch our own HTML bypassing all
@@ -591,8 +591,28 @@ function fallbackProviders(){
   return [
     { name:'Groq',       key:settings.groqKey,     base:'https://api.groq.com/openai/v1/chat/completions',  model:'llama-3.3-70b-versatile' },
     { name:'Cerebras',   key:settings.cerebrasKey, base:'https://api.cerebras.ai/v1/chat/completions',      model:'llama-3.3-70b' },
-    { name:'OpenRouter', key:settings.orKey,       base:'https://openrouter.ai/api/v1/chat/completions',    model:'meta-llama/llama-3.3-70b-instruct:free' },
+    { name:'OpenRouter', key:settings.orKey,       base:'https://openrouter.ai/api/v1/chat/completions',    model:'auto-free' },
   ].filter(p=>p.key);
+}
+
+/* OpenRouter's free roster changes without notice → resolve a live free model
+   from their models API at call time instead of hardcoding a slug. */
+let orModelCache=null;
+async function resolveOrModel(){
+  if(orModelCache) return orModelCache;
+  try{
+    const r=await fetch('https://openrouter.ai/api/v1/models');
+    const d=await r.json();
+    const free=(d.data||[]).filter(m=>m.pricing && m.pricing.prompt==='0' && m.pricing.completion==='0' && /:free$/.test(m.id));
+    const pref=['llama','qwen','gpt-oss','gemma','nemotron','glm','kimi','hermes'];
+    free.sort((a,b)=>{
+      const ai=pref.findIndex(p=>a.id.toLowerCase().includes(p));
+      const bi=pref.findIndex(p=>b.id.toLowerCase().includes(p));
+      return (ai<0?99:ai)-(bi<0?99:bi);
+    });
+    orModelCache = free.length ? free[0].id : 'openrouter/free';
+  }catch(_){ orModelCache='openrouter/free'; }
+  return orModelCache;
 }
 
 async function callChain(msgs, sys){
@@ -614,13 +634,18 @@ async function callChain(msgs, sys){
   // 2) fallback providers in order, starting from last known-good
   const fbs=fallbackProviders();
   for(let i=chain.fbStart; i<fbs.length; i++){
-    const p=fbs[i];
+    let p=fbs[i];
+    if(p.name==='OpenRouter') p={...p, model: await resolveOrModel()};
     try{
       const out=await callOpenAICompat(p, msgs, sys);
       chain.fbStart=i;
       if(chain.lastProvider!==p.name){ toast('한도 초과 — '+p.name+'로 자동 전환', 2500); chain.lastProvider=p.name; }
       return out;
-    }catch(err){ lastErr=err; /* any failure → next provider */ }
+    }catch(err){
+      lastErr=err;
+      if(p.name==='OpenRouter' && /404/.test(err.message)) orModelCache=null;  // stale model → re-resolve next time
+      /* any failure → next provider */
+    }
   }
   throw lastErr || new Error('사용 가능한 API가 없습니다. 설정에서 키를 확인하세요.');
 }
