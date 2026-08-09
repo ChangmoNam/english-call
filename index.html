@@ -251,7 +251,13 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       </div>
     </div>
     <div class="field" style="margin-top:-12px">
-      <div class="hint">폴백 순서: Gemini → Groq → Cerebras → OpenRouter. 키가 있는 곳만 사용합니다. 무료 발급: cloud.cerebras.ai · openrouter.ai (둘 다 카드 불필요)</div>
+      <div class="hint">무료 발급: cloud.cerebras.ai · openrouter.ai (둘 다 카드 불필요)</div>
+    </div>
+
+    <div class="field">
+      <label>SambaNova API 키 (선택·폴백)</label>
+      <input id="sambaKey" type="password" placeholder="키 입력">
+      <div class="hint">폴백 순서: Gemini → Groq → Cerebras → SambaNova → OpenRouter. 키가 있는 곳만 사용. 발급: cloud.sambanova.ai (카드 불필요)</div>
     </div>
 
     <div class="field">
@@ -280,7 +286,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 /* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
-const APP_VER='v8.8';
+const APP_VER='v9.0';
 document.getElementById('verTag').textContent=APP_VER;
 /* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
    don't appear immediately. On every launch, fetch our own HTML bypassing all
@@ -300,7 +306,7 @@ document.getElementById('verTag').textContent=APP_VER;
 })();
 
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
-const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'', cerebrasKey:'', orKey:'' };
+const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'', cerebrasKey:'', orKey:'', sambaKey:'' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
 let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
@@ -592,9 +598,10 @@ function resetChain(){ chain={ geminiDead:false, fbStart:0, lastProvider:'' }; }
 
 function fallbackProviders(){
   return [
-    { name:'Groq',       key:settings.groqKey,     base:'https://api.groq.com/openai/v1/chat/completions',  model:'llama-3.3-70b-versatile' },
-    { name:'Cerebras',   key:settings.cerebrasKey, base:'https://api.cerebras.ai/v1/chat/completions',      model:'llama-3.3-70b' },
-    { name:'OpenRouter', key:settings.orKey,       base:'https://openrouter.ai/api/v1/chat/completions',    model:'auto-free' },
+    { name:'Groq',       key:settings.groqKey,      base:'https://api.groq.com/openai/v1/chat/completions',  model:'llama-3.3-70b-versatile' },
+    { name:'Cerebras',   key:settings.cerebrasKey,  base:'https://api.cerebras.ai/v1/chat/completions',      model:'llama-3.3-70b' },
+    { name:'SambaNova',  key:settings.sambaKey,     base:'https://api.sambanova.ai/v1/chat/completions',     model:'Meta-Llama-3.3-70B-Instruct' },
+    { name:'OpenRouter', key:settings.orKey,        base:'https://openrouter.ai/api/v1/chat/completions',    model:'auto-free' },
   ].filter(p=>p.key);
 }
 
@@ -810,7 +817,7 @@ function loadSettingsUI(){
   $('provider').value=settings.provider; $('model').value=settings.model;
   $('apiKey').value=settings.apiKey; $('ttsRate').value=settings.ttsRate;
   $('sessionMin').value=settings.sessionMin; $('irText').value=irText;
-  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||''; $('cerebrasKey').value=settings.cerebrasKey||''; $('orKey').value=settings.orKey||'';
+  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||''; $('cerebrasKey').value=settings.cerebrasKey||''; $('orKey').value=settings.orKey||''; $('sambaKey').value=settings.sambaKey||'';
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
 }
 $('provider').onchange = e=>{
@@ -819,7 +826,7 @@ $('provider').onchange = e=>{
 $('saveBtn').onclick = ()=>{
   settings={ provider:$('provider').value, model:$('model').value.trim(),
     apiKey:$('apiKey').value.trim(), ttsRate:$('ttsRate').value, sessionMin:$('sessionMin').value,
-    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim(), mdWebhook:$('mdWebhook').value.trim(), cerebrasKey:$('cerebrasKey').value.trim(), orKey:$('orKey').value.trim() };
+    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim(), mdWebhook:$('mdWebhook').value.trim(), cerebrasKey:$('cerebrasKey').value.trim(), orKey:$('orKey').value.trim(), sambaKey:$('sambaKey').value.trim() };
   irText=$('irText').value;
   localStorage.setItem(LS.set, JSON.stringify(settings));
   localStorage.setItem(LS.ir, irText);
