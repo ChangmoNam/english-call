@@ -121,7 +121,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       <div class="ring"></div><div class="ring"></div><div class="ring"></div>
       <div class="avatar">🤖</div>
     </div>
-    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v5</div>
+    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v6</div>
     <div class="caller-name">Alex Reed</div>
     <div class="caller-role">Humanoid Robotics Expert · VC Partner<br>Your English Coach</div>
     <div class="call-status" id="callStatus">Ringing…</div>
@@ -188,7 +188,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
     <div class="field">
       <label>API 키</label>
       <input id="apiKey" type="password" placeholder="API 키 입력">
-      <div class="hint">Gemini: aistudio.google.com에서 무료 발급 · Claude: console.anthropic.com<br>키는 이 기기의 브라우저(localStorage)에만 저장됩니다.</div>
+      <div class="hint">Gemini: aistudio.google.com에서 발급 · Claude: console.anthropic.com<br>여러 키를 쉼표(,)로 구분해 넣으면 한도 초과 시 다음 키로 자동 전환됩니다. 모든 키가 소진되면 Groq 키가 있을 경우 Groq(Llama)로 자동 폴백합니다. 키는 이 기기의 브라우저에만 저장됩니다.</div>
     </div>
 
     <div class="field">
@@ -496,8 +496,30 @@ async function callLLM(msgs, sys){
   if(settings.provider==='claude') return callClaude(msgs, sys);
   return callGemini(msgs, sys);
 }
+function isQuotaError(msg){ return /429|RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(msg||''); }
+
 async function callGemini(msgs, sys){
-  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model||'gemini-3.6-flash')}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
+  // apiKey field may contain multiple keys separated by commas → try in order on quota errors
+  const keys = (settings.apiKey||'').split(',').map(k=>k.trim()).filter(Boolean);
+  if(!keys.length) throw new Error('API 키가 없습니다.');
+  let lastErr=null;
+  for(const key of keys){
+    try{ return await callGeminiWithKey(msgs, sys, key); }
+    catch(err){
+      lastErr=err;
+      if(!isQuotaError(err.message)) throw err;   // real error → stop
+      // quota error → try next key
+    }
+  }
+  // all Gemini keys exhausted → fall back to Groq LLM if available
+  if(settings.groqKey){
+    toast('Gemini 한도 초과 — Groq(Llama)로 자동 전환합니다', 3000);
+    return callGroqLLM(msgs, sys);
+  }
+  throw lastErr;
+}
+async function callGeminiWithKey(msgs, sys, key){
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model||'gemini-3.6-flash')}:generateContent?key=${encodeURIComponent(key)}`;
   const contents = msgs.map(m=>({ role: m.role==='assistant'?'model':'user', parts:[{text:m.content}] }));
   const res = await fetch(url,{ method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ system_instruction:{parts:[{text:sys}]}, contents,
@@ -505,6 +527,16 @@ async function callGemini(msgs, sys){
   if(!res.ok){ const e=await res.text(); throw new Error('Gemini '+res.status+': '+e.slice(0,180)); }
   const data = await res.json();
   return (data.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('');
+}
+async function callGroqLLM(msgs, sys){
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions',{
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+settings.groqKey },
+    body: JSON.stringify({ model:'llama-3.3-70b-versatile', max_tokens:1024,
+      messages:[ {role:'system', content:sys}, ...msgs.map(m=>({role:m.role, content:m.content})) ] }) });
+  if(!res.ok){ const e=await res.text(); throw new Error('GroqLLM '+res.status+': '+e.slice(0,150)); }
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '';
 }
 async function callClaude(msgs, sys){
   const res = await fetch('https://api.anthropic.com/v1/messages',{ method:'POST',
