@@ -280,7 +280,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 /* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
-const APP_VER='v8.6';
+const APP_VER='v8.7';
 document.getElementById('verTag').textContent=APP_VER;
 /* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
    don't appear immediately. On every launch, fetch our own HTML bypassing all
@@ -549,7 +549,7 @@ For EVERY topic, climb this 4-step ladder:
 - STEP 2 (evidence): Similar question rephrased → 2 sentences: claim + one number/fact as evidence.
 - STEP 3 (structured): Similar variation → 3–4 sentences in expert structure: claim → evidence (numbers) → implication ("...and that is why X").
 - STEP 4 (follow-up chain): Now drill DEEPER with 2–3 pointed follow-ups on the SAME topic, like a real interviewer: "Why?", "How is that different from Unitree?", "What's the risk there?", "But your competitor says X — respond." Each expects a 3–5 sentence expert answer.
-Only after STEP 4 may you move to a NEW topic. That is roughly 6–10 exchanges per topic. Moving on after one good answer is FORBIDDEN.
+Only after STEP 4 may you move to a NEW topic. With the double-pass rule below, that is roughly 10–16 exchanges per topic. Moving on after one good answer is FORBIDDEN.
 
 Guide length explicitly: "Good headline. Now give me the same answer with a number." / "Now the full version — claim, evidence, and why it matters." / "Longer — you're the CSO, convince me."
 
@@ -566,8 +566,21 @@ STUDENT INPUT & STYLE:
 - If the student speaks Korean, respond in simple English and encourage English; short Korean hints only in correction.note_ko.
 - On "SESSION_END", reply with one warm closing sentence.
 
+DRILL STATE — you MUST track and output your position every turn:
+Every response includes "drill":{"topic":"3-5 word label","step":1|2|3|4,"passed":true|false}.
+PASS criteria (ALL must hold, be STRICT — when in doubt, FAIL):
+  (a) length meets the current step's target,
+  (b) grammar is acceptable (minor slips OK at step 1–2 only),
+  (c) content is complete — not cut off, not trailing away, not one fragment, not Korean, not "um / I don't know".
+GATE RULES (absolute):
+  - passed=false → your "reply" MUST re-ask the SAME question (you may give model_answer first and say "Try again"). You may NOT introduce a new question or topic. No exceptions — an unanswered question is never skipped.
+  - If the student seems stuck (very short answer, silence-like fragment, gave up mid-sentence): treat as passed=false, give the model_answer for the current step, ask them to repeat it, then re-ask the SAME question.
+  - DOUBLE-PASS: each of steps 1–3 requires TWO passing answers — after the first pass, ask ONE rephrased variation of the same question at the SAME step ("Good — one more time, differently: ..."). Only after the second pass move up a step.
+  - Step 4: ask 2–3 follow-ups; each follow-up is itself gated (fail → re-ask that follow-up).
+  - Expect roughly 10–16 exchanges per topic. Finishing a topic in under 8 exchanges means you moved too fast.
+
 OUTPUT FORMAT — reply with STRICT JSON only, no markdown, no code fences:
-{"heard":"cleaned English of what the student meant, or null if not applicable","reply":"what you say out loud (short!)","correction":{"wrong":"student's mistaken phrase","right":"corrected phrase","note_ko":"아주 짧은 한국어 설명"} or null,"model_answer":"short model answer to practice" or null}`;
+{"heard":"cleaned English of what the student meant, or null if not applicable","reply":"what you say out loud (short!)","correction":{"wrong":"student's mistaken phrase","right":"corrected phrase","note_ko":"아주 짧은 한국어 설명"} or null,"model_answer":"model answer to practice (length scales with step)" or null,"drill":{"topic":"…","step":1,"passed":false}}`;
 }
 
 const SUMMARY_PROMPT = `You are a study-log writer. Given the transcript of today's English IR-conversation lesson, output STRICT JSON only (no markdown):
@@ -702,6 +715,15 @@ async function sendStudent(text){
     messages.push({role:'assistant', content:raw});
     const j = parseJSON(raw);
     hideTyping();
+    if(j.drill && j.drill.topic){
+      const key=j.drill.topic+'|'+j.drill.step;
+      if(key!==lastDrillKey){
+        lastDrillKey=key;
+        addSys('📍 '+j.drill.topic+' · STEP '+j.drill.step+'/4');
+      } else if(j.drill.passed===false){
+        addSys('↻ 다시 — 같은 질문에 재도전');
+      }
+    }
     if(j.heard && j.heard.toLowerCase()!==text.toLowerCase()) addHeard(j.heard);
     if(j.correction && j.correction.right) addCorrection(j.correction);
     addBubble('ai', j.reply||'…', 'Alex');
@@ -719,7 +741,7 @@ async function sendStudent(text){
 async function startSession(){
   if(!settings.apiKey){ toast('먼저 설정에서 API 키를 입력하세요.'); show('settingsScreen'); return; }
   messages=[]; chat.innerHTML='';
-  resetChain();
+  resetChain(); lastDrillKey='';
   show('sessionScreen');
   addSys(todayStr()+' · IR English Session');
   dailyBase = getDaily().sec;
@@ -750,6 +772,7 @@ function getDaily(){
 function saveDaily(d){ localStorage.setItem(LS_DAILY, JSON.stringify(d)); }
 function goalSec(){ return (parseInt(settings.sessionMin)||30)*60; }
 let dailyBase=0;   // seconds accumulated before this session started
+let lastDrillKey='';
 
 function notifyGoalMet(){
   const d=getDaily(); if(d.notified) return;
