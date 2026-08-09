@@ -247,7 +247,6 @@ let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
 let messages = [];        // current session [{role,content}]
 let listening=false, busy=false, timerInt=null, startTs=0, lastReply='';
-let recog=null, finalBuf='';
 
 const $ = id => document.getElementById(id);
 const chat=$('chat'), interim=$('interim'), micBtn=$('micBtn');
@@ -278,25 +277,36 @@ function speak(text, rate){
 }
 
 /* =================== STT =================== */
+let recog=null, committedText='', currentText='';
+
+/* Android Chrome fires onresult with the FULL accumulated results repeatedly.
+   Appending finals causes duplication — instead, rebuild the whole transcript
+   from e.results every event (idempotent), and commit it when the recognizer
+   restarts (results array resets on each start). */
+function dedupeRuns(s){
+  // collapse 3+ consecutive repeats of the same 1–4 word phrase (STT glitch), keep ≤2 (may be intentional)
+  return s.replace(/\b((?:\S+\s+){0,3}\S+)(?:\s+\1\b){2,}/gi, '$1');
+}
 function initRecog(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SR){ toast('이 브라우저는 음성인식을 지원하지 않습니다. Android Chrome을 사용하세요.',4000); return null; }
   const r = new SR();
   r.lang='en-US'; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
   r.onresult = e=>{
-    let interimTxt='';
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      const t=e.results[i][0].transcript;
-      if(e.results[i].isFinal) finalBuf += t+' ';
-      else interimTxt += t;
-    }
-    interim.textContent = (finalBuf+interimTxt).trim() || '…';
+    let txt='';
+    for(let i=0;i<e.results.length;i++) txt += e.results[i][0].transcript + ' ';
+    currentText = txt.trim();
+    interim.textContent = dedupeRuns((committedText+' '+currentText).trim()) || '…';
   };
   r.onerror = e=>{
     if(e.error==='not-allowed'){ toast('마이크 권한을 허용해주세요.'); stopListening(false); }
     else if(e.error==='no-speech'){ /* keep waiting */ }
   };
-  r.onend = ()=>{ if(listening){ try{ r.start(); }catch(_){} } };  // auto-restart while listening
+  r.onend = ()=>{
+    committedText = (committedText+' '+currentText).trim();
+    currentText='';
+    if(listening){ try{ r.start(); }catch(_){} }
+  };
   return r;
 }
 
@@ -305,7 +315,7 @@ function startListening(){
   speechSynthesis.cancel();
   if(!recog) recog = initRecog();
   if(!recog) return;
-  finalBuf=''; interim.textContent='…';
+  committedText=''; currentText=''; interim.textContent='…';
   listening=true;
   micBtn.classList.add('listening'); micBtn.textContent='⏹';
   $('micHint').textContent='듣는 중 · 말이 끝나면 탭하세요';
@@ -316,8 +326,8 @@ function stopListening(send=true){
   if(recog){ try{ recog.stop(); }catch(_){} }
   micBtn.classList.remove('listening'); micBtn.textContent='🎙️';
   $('micHint').textContent='탭하고 영어로 말하세요 · 끝나면 다시 탭';
-  const text = finalBuf.trim() || interim.textContent.replace('…','').trim();
-  interim.textContent='';
+  const text = dedupeRuns((committedText+' '+currentText).trim());
+  committedText=''; currentText=''; interim.textContent='';
   if(send && text) sendStudent(text);
 }
 micBtn.onclick = ()=> listening ? stopListening(true) : startListening();
