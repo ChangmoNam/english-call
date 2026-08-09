@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#10141B">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
 <title>IR English Call — Daily 5PM</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -121,7 +123,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       <div class="ring"></div><div class="ring"></div><div class="ring"></div>
       <div class="avatar">🤖</div>
     </div>
-    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v6</div>
+    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v8</div>
     <div class="caller-name">Alex Reed</div>
     <div class="caller-role">Humanoid Robotics Expert · VC Partner<br>Your English Coach</div>
     <div class="call-status" id="callStatus">Ringing…</div>
@@ -238,6 +240,12 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       </div>
     </div>
 
+    <div class="field">
+      <label>MacroDroid 웹훅 URL (선택)</label>
+      <input id="mdWebhook" placeholder="https://trigger.macrodroid.com/기기ID/goalmet">
+      <div class="hint">하루 목표(세션 길이 × 1) 달성 시 이 주소를 호출해 남은 알람을 끕니다. MacroDroid의 '웹훅(URL)' 트리거 화면에 표시되는 주소를 붙여넣으세요.</div>
+    </div>
+
     <div class="mem-box">
       <div class="mem-title">학습 기억 (Memory)</div>
       <div class="mem-count" id="memInfo">저장된 세션 요약: 0개</div>
@@ -258,7 +266,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 const LS = { set:'ecall_settings', ir:'ecall_ir', mem:'ecall_memory' };
-const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'' };
+const DEFAULTS = { provider:'gemini', model:'gemini-3.6-flash', apiKey:'', ttsRate:'0.85', sessionMin:'30', sttEngine:'browser', groqKey:'', mdWebhook:'' };
 let settings = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(LS.set)||'{}')) };
 let irText   = localStorage.getItem(LS.ir) || '';
 let memory   = JSON.parse(localStorage.getItem(LS.mem)||'[]');   // array of session summaries
@@ -276,6 +284,25 @@ function todayStr(){ return new Date().toISOString().slice(0,10); }
 
 function show(id){ ['callScreen','sessionScreen','settingsScreen'].forEach(s=>$(s).classList.remove('on')); $(id).classList.add('on'); }
 
+/* =================== DOMAIN TERMS (v7) =================== */
+/* STT often mishears company terms; TTS spells all-caps words letter by letter.
+   Fix both directions. Screen shows the correct spelling; only speech differs. */
+function normalizeTerms(s){
+  return s
+    .replace(/\b(roblox|rob\s?ross|rob\s?bros?|rob\s?rose|robross|robros|roberts?|robbers?)\b/gi,'ROBROS')
+    // "이그리스-씨" mishearings + C suffix (c/see/sea/si/she/cee)
+    .replace(/\b(?:igris|ig[\s-]?ris|ig[\s-]?rees|e[\s-]?gris|ee[\s-]?gris|e[\s-]?grees|e[\s-]?chris|e[\s-]?cris|e[\s-]?crease|increase|in[\s-]?grease|egress|ingress|iris|aegis|[ae][\s-]?greece?|[ae][\s-]?grease|ee[\s-]?grease|eagris|hygris|e[\s-]?g[\s-]?risk?)[\s.,-]*(?:c|cee|see|sea|si|she)\b/gi,'IGRIS-C')
+    // strongly unique tokens map even without the C (skip if C already follows)
+    .replace(/\b(igris|ig[\s-]?ris|eagris|aegis)\b(?![\s-]?c\b)/gi,'IGRIS-C');
+}
+function speakable(s){
+  return s
+    .replace(/\bROBROS\b/g,'Robross')      // read as a word, not R-O-B-R-O-S
+    .replace(/\bIGRIS-?C\b/g,'Igris C')
+    .replace(/\bPoC\b/g,'P O C');
+}
+const WHISPER_PROMPT='ROBROS, IGRIS-C, humanoid robotics company, Whole Body Control, Sim2Real, VLA, teleoperation, actuator, payload, BOM cost, Unitree, Boston Dynamics, Figure AI, IR meeting.';
+
 /* =================== TTS =================== */
 let voices=[];
 function loadVoices(){ voices = speechSynthesis.getVoices(); }
@@ -287,7 +314,7 @@ function pickVoice(){
 function speak(text, rate){
   if(!text) return;
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
+  const u = new SpeechSynthesisUtterance(speakable(text));
   const v = pickVoice(); if(v) u.voice=v;
   u.lang='en-US'; u.rate = rate || parseFloat(settings.ttsRate)||0.85; u.pitch=1;
   speechSynthesis.speak(u);
@@ -364,6 +391,7 @@ async function transcribeGroq(blob){
   fd.append('file', blob, 'speech.webm');
   fd.append('model','whisper-large-v3-turbo');
   fd.append('language','en');
+  fd.append('prompt', WHISPER_PROMPT);
   const res=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{
     method:'POST', headers:{ 'Authorization':'Bearer '+settings.groqKey }, body:fd });
   if(!res.ok){ const e=await res.text(); throw new Error('Groq '+res.status+': '+e.slice(0,150)); }
@@ -560,6 +588,7 @@ const HISTORY_WINDOW = 16;   // send only recent messages; long-term context liv
 /* =================== CONVERSATION FLOW =================== */
 async function sendStudent(text){
   if(busy) return; busy=true;
+  text = normalizeTerms(text);
   addBubble('me', text, 'You');
   messages.push({role:'user', content:text});
   showTyping();
@@ -587,6 +616,7 @@ async function startSession(){
   messages=[]; chat.innerHTML='';
   show('sessionScreen');
   addSys(todayStr()+' · IR English Session');
+  dailyBase = getDaily().sec;
   startTs=Date.now();
   clearInterval(timerInt);
   timerInt=setInterval(tick, 1000);
@@ -604,10 +634,34 @@ async function startSession(){
   busy=false;
 }
 
+/* =================== DAILY GOAL (v8) =================== */
+const LS_DAILY='ecall_daily';
+function getDaily(){
+  let d=null; try{ d=JSON.parse(localStorage.getItem(LS_DAILY)||'null'); }catch(_){}
+  if(!d || d.date!==todayStr()) d={date:todayStr(), sec:0, notified:false};
+  return d;
+}
+function saveDaily(d){ localStorage.setItem(LS_DAILY, JSON.stringify(d)); }
+function goalSec(){ return (parseInt(settings.sessionMin)||30)*60; }
+let dailyBase=0;   // seconds accumulated before this session started
+
+function notifyGoalMet(){
+  const d=getDaily(); if(d.notified) return;
+  d.notified=true; saveDaily(d);
+  addSys('🎯 오늘 '+settings.sessionMin+'분 목표 달성! 남은 알람은 울리지 않습니다.');
+  if(settings.mdWebhook){
+    fetch(settings.mdWebhook, {mode:'no-cors'}).catch(()=>{});
+  }
+}
+
 function tick(){
   const s=Math.floor((Date.now()-startTs)/1000);
   const mm=String(Math.floor(s/60)).padStart(2,'0'), ss=String(s%60).padStart(2,'0');
   $('timer').textContent=mm+':'+ss;
+  // persist daily progress every 10s (survives app being closed mid-session)
+  if(s%10===0){ const d=getDaily(); d.sec=dailyBase+s; saveDaily(d); }
+  const total=dailyBase+s;
+  if(total>=goalSec() && !getDaily().notified) notifyGoalMet();
   const limit=parseInt(settings.sessionMin)*60;
   if(s===limit){ addSys('⏰ '+settings.sessionMin+'분이 지났습니다. 통화 종료를 눌러 오늘 학습을 저장하세요.'); speak("Time is up. Great work today!"); }
 }
@@ -636,6 +690,7 @@ async function endSession(){
   }
 }
 function cleanupSession(){
+  if(startTs){ const d=getDaily(); d.sec=dailyBase+Math.floor((Date.now()-startTs)/1000); saveDaily(d); startTs=0; }
   clearInterval(timerInt); stopListening(false); speechSynthesis.cancel();
   messages=[]; refreshMemoChip(); show('callScreen');
 }
@@ -645,7 +700,7 @@ function loadSettingsUI(){
   $('provider').value=settings.provider; $('model').value=settings.model;
   $('apiKey').value=settings.apiKey; $('ttsRate').value=settings.ttsRate;
   $('sessionMin').value=settings.sessionMin; $('irText').value=irText;
-  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||'';
+  $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||'';
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
 }
 $('provider').onchange = e=>{
@@ -654,7 +709,7 @@ $('provider').onchange = e=>{
 $('saveBtn').onclick = ()=>{
   settings={ provider:$('provider').value, model:$('model').value.trim(),
     apiKey:$('apiKey').value.trim(), ttsRate:$('ttsRate').value, sessionMin:$('sessionMin').value,
-    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim() };
+    sttEngine:$('sttEngine').value, groqKey:$('groqKey').value.trim(), mdWebhook:$('mdWebhook').value.trim() };
   irText=$('irText').value;
   localStorage.setItem(LS.set, JSON.stringify(settings));
   localStorage.setItem(LS.ir, irText);
@@ -693,13 +748,18 @@ $('importFile').onchange=e=>{
 };
 $('clearMem').onclick=()=>{ if(confirm('모든 학습 기억을 삭제할까요? (되돌릴 수 없음)')){ memory=[]; localStorage.setItem(LS.mem,'[]'); loadSettingsUI(); toast('초기화되었습니다'); } };
 
-/* call screen memo chip */
+/* call screen memo chip + daily progress */
 function refreshMemoChip(){
-  const c=$('memoChip');
-  if(!memory.length){ c.textContent='첫 세션입니다'; return; }
+  const c=$('memoChip'), d=getDaily();
+  const min=Math.floor(d.sec/60), goal=parseInt(settings.sessionMin)||30;
+  const prog='오늘 '+min+'/'+goal+'분';
+  const st=$('callStatus');
+  if(d.sec>=goal*60){ st.textContent='오늘 목표 달성 ✅'; st.style.color='var(--green)'; }
+  else { st.textContent='Ringing…'; st.style.color='var(--amber)'; }
+  if(!memory.length){ c.textContent=prog+' · 첫 세션입니다'; return; }
   const last=memory[memory.length-1];
-  const pend=(last.pending_drills&&last.pending_drills[0])?(' · 복습: '+String(last.pending_drills[0]).slice(0,28)+'…'):'';
-  c.textContent='세션 '+memory.length+'회 완료'+pend;
+  const pend=(last.pending_drills&&last.pending_drills[0])?(' · 복습: '+String(last.pending_drills[0]).slice(0,22)+'…'):'';
+  c.textContent=prog+' · 세션 '+memory.length+'회'+pend;
 }
 refreshMemoChip();
 
