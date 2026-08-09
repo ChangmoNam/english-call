@@ -121,7 +121,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
       <div class="ring"></div><div class="ring"></div><div class="ring"></div>
       <div class="avatar">🤖</div>
     </div>
-    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English</div>
+    <div class="eyebrow" style="margin-bottom:10px">Incoming call · Daily IR English · v3</div>
     <div class="caller-name">Alex Reed</div>
     <div class="caller-role">Humanoid Robotics Expert · VC Partner<br>Your English Coach</div>
     <div class="call-status" id="callStatus">Ringing…</div>
@@ -279,33 +279,52 @@ function speak(text, rate){
 /* =================== STT =================== */
 let recog=null, committedText='', currentText='';
 
-/* Android Chrome fires onresult with the FULL accumulated results repeatedly.
-   Appending finals causes duplication — instead, rebuild the whole transcript
-   from e.results every event (idempotent), and commit it when the recognizer
-   restarts (results array resets on each start). */
+/* v3 — Android Chrome delivers recognition results in inconsistent ways:
+   sometimes as separate segments, sometimes as GROWING cumulative snapshots
+   (each new entry repeats all previous text). Strategy:
+   1) continuous=false + auto-restart: each utterance session is independent,
+      committed exactly once on session end.
+   2) combineResults(): if an entry contains the accumulated text as a prefix,
+      it REPLACES it (cumulative mode); exact-duplicate tails are skipped;
+      otherwise entries are appended (segmented mode). */
+function combineResults(results){
+  let out='';
+  for(let i=0;i<results.length;i++){
+    const t=(results[i][0].transcript||'').trim();
+    if(!t) continue;
+    const lo=out.toLowerCase(), lt=t.toLowerCase();
+    if(!out) out=t;
+    else if(lt.startsWith(lo)) out=t;          // cumulative snapshot → replace
+    else if(lo.endsWith(lt)) continue;          // duplicated tail → skip
+    else out=out+' '+t;                         // real new segment → append
+  }
+  return out.trim();
+}
 function dedupeRuns(s){
-  // collapse 3+ consecutive repeats of the same 1–4 word phrase (STT glitch), keep ≤2 (may be intentional)
+  // safety net: collapse 3+ consecutive repeats of the same 1–4 word phrase
   return s.replace(/\b((?:\S+\s+){0,3}\S+)(?:\s+\1\b){2,}/gi, '$1');
 }
 function initRecog(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SR){ toast('이 브라우저는 음성인식을 지원하지 않습니다. Android Chrome을 사용하세요.',4000); return null; }
   const r = new SR();
-  r.lang='en-US'; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
+  r.lang='en-US'; r.continuous=false; r.interimResults=true; r.maxAlternatives=1;
   r.onresult = e=>{
-    let txt='';
-    for(let i=0;i<e.results.length;i++) txt += e.results[i][0].transcript + ' ';
-    currentText = txt.trim();
+    currentText = combineResults(e.results);   // replace, never append across events
     interim.textContent = dedupeRuns((committedText+' '+currentText).trim()) || '…';
   };
   r.onerror = e=>{
     if(e.error==='not-allowed'){ toast('마이크 권한을 허용해주세요.'); stopListening(false); }
-    else if(e.error==='no-speech'){ /* keep waiting */ }
+    /* 'no-speech' / 'aborted' → onend will restart while listening */
   };
   r.onend = ()=>{
-    committedText = (committedText+' '+currentText).trim();
-    currentText='';
-    if(listening){ try{ r.start(); }catch(_){} }
+    if(currentText){
+      const lo=committedText.toLowerCase(), lt=currentText.toLowerCase();
+      if(!committedText) committedText=currentText;
+      else if(!lo.endsWith(lt)) committedText=committedText+' '+currentText;
+      currentText='';
+    }
+    if(listening){ try{ r.start(); }catch(_){} }  // next utterance session
   };
   return r;
 }
