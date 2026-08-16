@@ -267,6 +267,16 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
     </div>
 
     <div class="mem-box">
+      <div class="mem-title">질문·모범답안 기록 (Q&A Log)</div>
+      <div class="mem-count" id="qaInfo">누적 Q&A: 0개</div>
+      <div class="mem-actions">
+        <button class="mini-btn" id="qaShare">📧 이메일로 공유</button>
+        <button class="mini-btn" id="qaDownload">CSV 다운로드</button>
+        <button class="mini-btn danger" id="qaClear">기록 삭제</button>
+      </div>
+    </div>
+
+    <div class="mem-box">
       <div class="mem-title">학습 기억 (Memory)</div>
       <div class="mem-count" id="memInfo">저장된 세션 요약: 0개</div>
       <div class="mem-actions">
@@ -286,7 +296,7 @@ button{font-family:inherit;border:none;cursor:pointer;background:none;color:inhe
 <script>
 /* =================== STATE =================== */
 /* =================== VERSION / AUTO-UPDATE (v8.2) =================== */
-const APP_VER='v9.0';
+const APP_VER='v9.2';
 document.getElementById('verTag').textContent=APP_VER;
 /* GitHub Pages caches files ~10 min and Chrome caches locally, so new deploys
    don't appear immediately. On every launch, fetch our own HTML bypassing all
@@ -342,6 +352,39 @@ function speakable(s){
     .replace(/\bPoC\b/g,'P O C');
 }
 const WHISPER_PROMPT='ROBROS, IGRIS-C, humanoid robotics company, Whole Body Control, Sim2Real, VLA, teleoperation, actuator, payload, BOM cost, Unitree, Boston Dynamics, Figure AI, IR meeting.';
+
+/* =================== Q&A LOG (v9.1) =================== */
+const LS_QA='ecall_qa';
+function getQA(){ try{ return JSON.parse(localStorage.getItem(LS_QA)||'[]'); }catch(_){ return []; } }
+function saveQA(row){
+  const list=getQA(); list.push(row);
+  if(list.length>1000) list.splice(0, list.length-1000);
+  localStorage.setItem(LS_QA, JSON.stringify(list));
+}
+function csvEsc(s){ s=String(s==null?'':s); return '"'+s.replace(/"/g,'""')+'"'; }
+function buildQACsv(){
+  const rows=getQA();
+  const head=['date','question','my_answer','model_answer','correction'];
+  const lines=[head.join(',')].concat(rows.map(r=>head.map(h=>csvEsc(r[h])).join(',')));
+  return lines.join('\r\n');
+}
+function qaFile(){
+  return new File(['\uFEFF'+buildQACsv()], 'english-qa-'+todayStr()+'.csv', {type:'text/csv'});
+}
+function downloadQA(){
+  if(!getQA().length){ toast('저장된 Q&A가 없습니다.'); return; }
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(qaFile()); a.download='english-qa-'+todayStr()+'.csv'; a.click();
+}
+async function shareQA(){
+  if(!getQA().length){ toast('저장된 Q&A가 없습니다.'); return; }
+  const f=qaFile();
+  if(navigator.canShare && navigator.canShare({files:[f]})){
+    try{ await navigator.share({files:[f], title:'English Q&A CSV'}); return; }
+    catch(e){ if(e && e.name==='AbortError') return; }
+  }
+  downloadQA(); toast('공유 미지원 환경 — CSV를 다운로드했습니다. 이메일에 첨부해주세요.', 3500);
+}
 
 /* =================== TTS =================== */
 let voices=[];
@@ -715,7 +758,11 @@ async function sendStudent(text){
     if(j.heard && j.heard.toLowerCase()!==text.toLowerCase()) addHeard(j.heard);
     if(j.correction && j.correction.right) addCorrection(j.correction);
     addBubble('ai', j.reply||'…', 'Alex');
-    if(j.model_answer) addModel(j.model_answer);
+    if(j.model_answer){
+      addModel(j.model_answer);
+      saveQA({ date:todayStr(), question:lastReply||'', my_answer:(j.heard||text), model_answer:j.model_answer,
+               correction: j.correction ? (j.correction.wrong+' → '+j.correction.right) : '' });
+    }
     lastReply=j.reply||'';
     speak(lastReply);
   }catch(err){
@@ -819,7 +866,11 @@ function loadSettingsUI(){
   $('sessionMin').value=settings.sessionMin; $('irText').value=irText;
   $('sttEngine').value=settings.sttEngine||'browser'; $('groqKey').value=settings.groqKey||''; $('mdWebhook').value=settings.mdWebhook||''; $('cerebrasKey').value=settings.cerebrasKey||''; $('orKey').value=settings.orKey||''; $('sambaKey').value=settings.sambaKey||'';
   $('memInfo').textContent='저장된 세션 요약: '+memory.length+'개'+(memory.length?' · 최근 '+ (memory[memory.length-1].date||'') : '');
+  $('qaInfo').textContent='누적 Q&A: '+getQA().length+'개 (모범답안이 나올 때마다 자동 기록)';
 }
+$('qaShare').onclick=shareQA;
+$('qaDownload').onclick=downloadQA;
+$('qaClear').onclick=()=>{ if(confirm('Q&A 기록을 모두 삭제할까요?')){ localStorage.setItem(LS_QA,'[]'); loadSettingsUI(); toast('삭제되었습니다'); } };
 $('provider').onchange = e=>{
   $('model').value = e.target.value==='claude' ? 'claude-haiku-4-5-20251001' : 'gemini-3.6-flash';
 };
